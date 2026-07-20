@@ -133,6 +133,29 @@ def parse_status(homework):
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
+def processing_homeworks(homeworks, vk, last_statuses):
+    """Обработка списка домашних работ, отправка сообщений."""
+    for homework in homeworks:
+        try:
+            message = parse_status(homework)
+        except (KeyError, ValueError) as error:
+            logging.error(f'Ошибка данных в homework: {error}')
+            continue
+        name = homework['homework_name']
+        status = homework['status']
+        if last_statuses.get(name) != status:
+            try:
+                send_message(vk, message)
+                last_statuses[name] = status
+                logging.debug(
+                    f'Для ДЗ:{name} обновлен статус: {status}.'
+                )
+            except Exception as error:
+                logging.error(
+                    f'Не удалось отправить сообщение: {error}'
+                )
+
+
 def main():
     """Основная логика работы бота."""
     logging.basicConfig(
@@ -166,25 +189,7 @@ def main():
             if not homeworks:
                 logging.debug('Обновлений по статусам нет.')
             else:
-                for homework in homeworks:
-                    try:
-                        message = parse_status(homework)
-                    except (KeyError, ValueError) as error:
-                        logging.error(f'Ошибка данных в homework: {error}')
-                        continue
-                    name = homework['homework_name']
-                    status = homework['status']
-                    if last_statuses.get(name) != status:
-                        try:
-                            send_message(vk, message)
-                            last_statuses[name] = status
-                            logging.debug(
-                                f'Для ДЗ:{name} обновлен статус: {status}.'
-                            )
-                        except Exception as error:
-                            logging.error(
-                                f'Не удалось отправить сообщение: {error}'
-                            )
+                processing_homeworks(homeworks, vk, last_statuses)
             timestamp = current_date
             error_sent = False
 

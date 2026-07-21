@@ -6,8 +6,10 @@ import sys
 import time
 
 from dotenv import load_dotenv
+from http import HTTPStatus
 import requests
 import vk_api
+from vk_api.exceptions import ApiError
 
 load_dotenv()
 
@@ -16,7 +18,7 @@ PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 VK_TOKEN = os.getenv('VK_TOKEN')
 VK_USER_ID = os.getenv('VK_USER_ID')
 
-RETRY_PERIOD = 600
+RETRY_PERIOD = 6
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -54,9 +56,16 @@ def send_message(vk, message):
             random_id=random.randint(0, 100000)
         )
         logging.debug(f'Сообщение отправлено: {message}')
+        return True
+    except ApiError as error:
+        logging.error(f'Ошибка VK API: {error}')
+        return False
+    except requests.RequestException as error:
+        logging.error(f'Сетевая ошибка: {error}')
+        return False
     except Exception as error:
         logging.error(f'Ошибка при отправке сообщения: {error}')
-        raise
+        return False
 
 
 def get_api_answer(timestamp):
@@ -64,45 +73,49 @@ def get_api_answer(timestamp):
     payload = {'from_date': timestamp}
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
-        if response.status_code != 200:
-            logging.error(
-                f'Эндпоинт: {ENDPOINT} вернул статус {response.status_code}.'
-            )
-            raise Exception(f'HTTPError: {response.status_code}')
-        return response.json()
     except requests.RequestException as error:
-        logging.error(
-            f'Сбой в работе программы: Эндпоинт: {ENDPOINT}. {error}'
+        raise ConnectionError(
+            f'Сетевая ошибка. Эндпоинт: {ENDPOINT}. {error}. '
+            f'Параметры запроса: {payload}'
         )
-        return None
-    except Exception as error:
-        logging.error(
-            f'Сбой в работе программы: Эндпоинт {ENDPOINT}. {error}'
+    if response.status_code != HTTPStatus.OK:
+        raise RuntimeError(
+            f'HTTPError: {response.status_code}. Параметры запроса: {payload}'
         )
-        raise
+    return response.json()
 
 
 def check_response(response):
     """Проверяет ответ API на соответствие документации."""
     if not isinstance(response, dict):
-        logging.error('Полученный ответ не является словарем.')
-        raise TypeError('Полученный ответ не является словарем.')
+        message = (
+            f'Полученный ответ не является словарем. '
+            f'Ответ является: {type(response).__name__}'
+        )
+        logging.error(message)
+        raise TypeError(message)
     if 'homeworks' not in response:
-        logging.error('В ответе отсутствует ключ "homeworks".')
-        raise KeyError('В ответе отсутствует ключ "homeworks".')
+        message = 'В ответе отсутствует ключ "homeworks".'
+        logging.error(message)
+        raise KeyError(message)
     if not isinstance(response['homeworks'], list):
-        logging.error('В ответе по ключу "homeworks" не хранится список.')
-        raise TypeError('В ответе по ключу "homeworks" не хранится список.')
+        message = (
+            f'В ответе по ключу "homeworks" не хранится список. '
+            f'Ответ хранит: {type(response['homeworks']).__name__}'
+        )
+        logging.error(message)
+        raise TypeError(message)
     if 'current_date' not in response:
-        logging.error('В ответе отсутствует ключ "current_date".')
-        raise KeyError('В ответе отсутствует ключ "current_date".')
+        message = 'В ответе отсутствует ключ "current_date".'
+        logging.error(message)
+        raise KeyError(message)
     if not isinstance(response['current_date'], int):
-        logging.error(
-            'В ответе по ключу "current_date" не хранится число(int).'
+        message = (
+            f'В ответе по ключу "current_date" не хранится число(int). '
+            f'Ответ хранит: {type(response['current_date']).__name__}'
         )
-        raise TypeError(
-            'В ответе по ключу "current_date" не хранится число(int).'
-        )
+        logging.error(message)
+        raise TypeError(message)
 
 
 def parse_status(homework):
@@ -133,37 +146,8 @@ def parse_status(homework):
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-def processing_homeworks(homeworks, vk, last_statuses):
-    """Обработка списка домашних работ, отправка сообщений."""
-    for homework in homeworks:
-        try:
-            message = parse_status(homework)
-        except (KeyError, ValueError) as error:
-            logging.error(f'Ошибка данных в homework: {error}')
-            continue
-        name = homework['homework_name']
-        status = homework['status']
-        if last_statuses.get(name) != status:
-            try:
-                send_message(vk, message)
-                last_statuses[name] = status
-                logging.debug(
-                    f'Для ДЗ:{name} обновлен статус: {status}.'
-                )
-            except Exception as error:
-                logging.error(
-                    f'Не удалось отправить сообщение: {error}'
-                )
-
-
 def main():
     """Основная логика работы бота."""
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        stream=sys.stdout
-    )
-
     if not check_tokens():
         logging.critical('Программа принудительно остановлена.')
         sys.exit(1)
@@ -173,15 +157,11 @@ def main():
     vk = vk_session.get_api()
     timestamp = int((datetime.now() - timedelta(days=60)).timestamp())
 
-    last_statuses = {}
-    error_sent = False
+    last_status = ''
 
     while True:
         try:
             response = get_api_answer(timestamp)
-            if response is None:
-                time.sleep(RETRY_PERIOD)
-                continue
             check_response(response)
             homeworks = response['homeworks']
             current_date = response['current_date']
@@ -189,24 +169,27 @@ def main():
             if not homeworks:
                 logging.debug('Обновлений по статусам нет.')
             else:
-                processing_homeworks(homeworks, vk, last_statuses)
+                status = homeworks[-1].get('status')
+                if status != last_status:
+                    message = parse_status(homeworks[-1])
+                    if send_message(vk, message):
+                        last_status = status
+                        logging.debug(f'Статус обновлен: {status}')
             timestamp = current_date
-            error_sent = False
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
-            if not error_sent:
-                try:
-                    send_message(vk, message)
-                    error_sent = True
-                except Exception as error:
-                    logging.error(
-                        f'Сообщение об ошибке не было отправлено: {error}'
-                    )
-
+            if last_status != message:
+                if send_message(vk, message):
+                    last_status = message
         time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        stream=sys.stdout
+    )
     main()

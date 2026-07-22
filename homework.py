@@ -157,8 +157,8 @@ def main():
             else:
                 status = homeworks[0].get('status')
                 if (
-                    status != last_status and
-                    send_message(vk, parse_status(homeworks[0]))
+                    status != last_status
+                    and send_message(vk, parse_status(homeworks[0]))
                 ):
                     last_status = status
                     logging.debug(f'Статус обновлен: {status}')
